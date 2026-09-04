@@ -11,7 +11,8 @@ have: a glanceable surface and a phone-shaped protocol for it.
     PUT  /deck/layout               the phone's arrangement (per device)
     GET  /tiles/{id}                one tile
     POST /tiles/{id}                push a tile payload — June's cron, HA, curl, anyone with the token
-    GET  /thread?limit=             transcript, oldest first, from June's own session store
+    GET  /thread?limit=&bot=        transcript, oldest first — June's from Hermes, a bot's from here
+    GET  /bots                      the roster: June plus every OpenAI-compatible bot in BOTS
     POST /ingest                    batch of journal events from any Bright* app
     GET  /journal?limit=&app=       read the journal back (for June, or for you with curl)
     WS   /ws                        chat; protocol below
@@ -24,8 +25,8 @@ Android's WebSocket clients handle headers fine but curl/wscat testing is easier
 WebSocket protocol, one JSON object per text frame:
 
     → {"type":"hello","v":1,"device":"…"}                       first frame, always
-    ← {"type":"ok","session":"…","chips":[…],"deck_updated_at":…}
-    → {"type":"user","id":"u1","text":"lights to 40%"}
+    ← {"type":"ok","session":"…","chips":[…],"bots":[{"id":"june","name":"June"},…],"deck_updated_at":…}
+    → {"type":"user","id":"u1","text":"lights to 40%","bot":"june"}   bot optional; default june
     ← {"type":"start","id":"u1","reply":"r1"}
     ← {"type":"delta","id":"r1","text":"done — war"}           repeated
     ← {"type":"tool","id":"r1","name":"homeassistant","state":"started"|"done"|"failed"}
@@ -51,6 +52,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Web
 from fastapi.responses import JSONResponse
 
 import tiles as T
+from bots import JUNE, Bots, bots_from_env
 from hermes import Hermes
 from store import Store
 
@@ -60,6 +62,7 @@ log = logging.getLogger("brighthermes")
 cfg = T.Config.from_env()
 store = Store(cfg.data_dir / "brighthermes.db")
 hermes = Hermes(cfg.hermes_url, cfg.hermes_key, cfg.hermes_model)
+bots = Bots(bots_from_env(), store)
 refresher = T.Refresher(store, cfg)
 
 # Every open phone socket, so a tile change can be announced instead of polled for.
@@ -94,6 +97,7 @@ async def lifespan(_: FastAPI):
     finally:
         await refresher.stop()
         await hermes.aclose()
+        await bots.aclose()
         store.close()
 
 
@@ -223,12 +227,34 @@ async def refresh():
 
 
 @app.get("/thread", dependencies=[Depends(auth)])
-async def thread(limit: int = Query(default=60, ge=1, le=200), device: str = Depends(device_of)):
+async def thread(
+    limit: int = Query(default=60, ge=1, le=200),
+    bot: str = Query(default=JUNE),
+    device: str = Depends(device_of),
+):
+    if bot != JUNE:
+        if bots.get(bot) is None:
+            raise HTTPException(404, "no such bot")
+        return {"bot": bot, "messages": bots.transcript(device, bot, limit)}
     try:
-        return {"messages": await hermes.messages(device, limit)}
+        return {"bot": JUNE, "messages": await hermes.messages(device, limit)}
     except Exception as e:  # noqa: BLE001
         log.warning("thread: %s", e)
         raise HTTPException(502, "June did not answer")
+
+
+@app.delete("/thread", dependencies=[Depends(auth)])
+async def clear_thread(bot: str = Query(...), device: str = Depends(device_of)):
+    """Forget a bot's transcript on this phone. June's lives in Hermes and is not touched here."""
+    if bot == JUNE or bots.get(bot) is None:
+        raise HTTPException(400, "only a configured bot's transcript can be cleared here")
+    store.clear_bot(device, bot)
+    return {"ok": True}
+
+
+@app.get("/bots", dependencies=[Depends(auth)])
+async def roster():
+    return {"bots": bots.roster()}
 
 
 # -- ingest --------------------------------------------------------------------------------------
@@ -287,17 +313,29 @@ async def ws(websocket: WebSocket, token: Optional[str] = Query(default=None)):
         return
 
     await websocket.send_text(
-        json.dumps({"type": "ok", "session": session, "chips": cfg.chips, "deck_updated_at": store.tiles_updated_at()})
+        json.dumps({
+            "type": "ok",
+            "session": session,
+            "chips": cfg.chips,
+            "bots": bots.roster(),
+            "deck_updated_at": store.tiles_updated_at(),
+        })
     )
     _sockets.add(websocket)
     turns: dict[str, asyncio.Task] = {}
 
-    async def run_turn(user_id: str, text: str) -> None:
+    async def run_turn(user_id: str, text: str, bot_id: str) -> None:
         reply_id = "r" + uuid.uuid4().hex[:8]
-        await websocket.send_text(json.dumps({"type": "start", "id": user_id, "reply": reply_id}))
+        await websocket.send_text(json.dumps({"type": "start", "id": user_id, "reply": reply_id, "bot": bot_id}))
         full: list[str] = []
+        bot = bots.get(bot_id)
+        if bot_id != JUNE and bot is None:
+            await websocket.send_text(json.dumps({"type": "error", "id": reply_id, "message": f"No bot called {bot_id}"}))
+            turns.pop(user_id, None)
+            return
+        source = hermes.stream(device, text) if bot is None else bots.stream(bot, device, text)
         try:
-            async for ev in hermes.stream(device, text):
+            async for ev in source:
                 n, d = ev.name, ev.data
                 if n == "assistant.delta":
                     delta = d.get("delta", "")
@@ -314,7 +352,9 @@ async def ws(websocket: WebSocket, token: Optional[str] = Query(default=None)):
                     )
                 elif n == "assistant.completed":
                     content = d.get("content") or "".join(full)
-                    await websocket.send_text(json.dumps({"type": "done", "id": reply_id, "text": content}, ensure_ascii=False))
+                    await websocket.send_text(
+                        json.dumps({"type": "done", "id": reply_id, "text": content, "bot": bot_id}, ensure_ascii=False)
+                    )
                 elif n == "error":
                     await websocket.send_text(json.dumps({"type": "error", "id": reply_id, "message": d.get("message", "June hit an error")}))
         except asyncio.CancelledError:
@@ -345,7 +385,8 @@ async def ws(websocket: WebSocket, token: Optional[str] = Query(default=None)):
                 # cancels the first, which is what a person interrupting means.
                 for task in list(turns.values()):
                     task.cancel()
-                turns[uid] = asyncio.create_task(run_turn(uid, text))
+                bot_id = str(msg.get("bot") or JUNE)
+                turns[uid] = asyncio.create_task(run_turn(uid, text, bot_id))
             elif t == "stop":
                 for task in list(turns.values()):
                     task.cancel()

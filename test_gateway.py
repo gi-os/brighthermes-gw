@@ -204,6 +204,19 @@ def fake_june():
     def msgs(sid: str):
         return {"data": [{"role": "assistant", "content": "Hi.", "created_at": 2}, {"role": "user", "content": "hey", "created_at": 1}]}
 
+    @j.post("/bot/v1/chat/completions")
+    async def bot_completions(req: Request):
+        b = await req.json()
+        # Echo how much context arrived, so the test can see the transcript replayed.
+        n = len([m for m in b["messages"] if m["role"] != "system"])
+
+        async def gen():
+            yield f'data: {json.dumps({"choices": [{"delta": {"content": f"ctx{n} "}}]})}\n\n'
+            yield f'data: {json.dumps({"choices": [{"delta": {"content": "ok"}}]})}\n\n'
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
     @j.post("/api/sessions/{sid}/chat/stream")
     async def chat(sid: str, req: Request):
         b = await req.json()
@@ -240,6 +253,7 @@ async def test_gateway_end_to_end(fake_june, monkeypatch):
     monkeypatch.setenv("WEATHER_LAT", "")  # no network fetchers in tests
     monkeypatch.setenv("WEATHER_LON", "")
     monkeypatch.setenv("BRIGHTHERMES_DIR", tempfile.mkdtemp())
+    monkeypatch.setenv("BOTS", json.dumps([{"id": "z13", "name": "Qwen", "base_url": fake_june + "/bot/v1", "model": "q", "system": "short"}]))
     import app as appmod
     appmod = importlib.reload(appmod)
     from fastapi.testclient import TestClient
@@ -293,3 +307,25 @@ async def test_gateway_end_to_end(fake_june, monkeypatch):
             assert ws.receive_json()["type"] == "deck"
             ws.send_text('{"type":"ping"}')
             assert ws.receive_json() == {"type": "pong"}
+
+            # A plain bot: same frames, transcript kept by the gateway and replayed as context.
+            assert [b["id"] for b in ok["bots"]] == ["june", "z13"]
+            for i in range(2):
+                ws.send_text(json.dumps({"type": "user", "id": f"b{i}", "text": f"hey {i}", "bot": "z13"}))
+                got = []
+                while True:
+                    m = ws.receive_json()
+                    got.append(m)
+                    if m["type"] == "done":
+                        break
+                assert got[0]["bot"] == "z13"
+                # First turn sees 1 message of context (itself); second sees 3 (user, assistant, user).
+                assert got[-1]["text"] == ("ctx1 ok" if i == 0 else "ctx3 ok")
+            th = c.get("/thread?bot=z13", headers=H).json()
+            assert [m["role"] for m in th["messages"]] == ["user", "assistant", "user", "assistant"]
+            ws.send_text(json.dumps({"type": "user", "id": "b9", "text": "x", "bot": "nope"}))
+            assert ws.receive_json()["type"] == "start"
+            assert ws.receive_json()["type"] == "error"
+        assert c.get("/bots", headers=H).json()["bots"][1]["name"] == "Qwen"
+        assert c.delete("/thread?bot=z13", headers=H).json() == {"ok": True}
+        assert c.get("/thread?bot=z13", headers=H).json()["messages"] == []
