@@ -1,0 +1,46 @@
+# On BasilNet: docker compose up -d --build
+#
+# The phone reaches this at hermes.basilnet.com through the Cloudflare tunnel (public hostname
+# → http://brighthermes:8650 on the cloudfare_v2_default network), and on the LAN at :8650. The
+# only credential is BRIGHTHERMES_TOKEN; HERMES_API_KEY is June's own API_SERVER_KEY, copied here
+# so the phone never holds it. Both live in .env, never in this file.
+services:
+  brighthermes:
+    build: .
+    container_name: brighthermes
+    restart: unless-stopped
+    ports:
+      - "192.168.68.59:8650:8650"
+    environment:
+      TZ: America/New_York
+      BRIGHTHERMES_TOKEN: ${BRIGHTHERMES_TOKEN:?set BRIGHTHERMES_TOKEN in .env}
+      # June. 172.17.0.1 is the docker0 gateway: hermes-gateway publishes 8642 on the host, and
+      # this container is on two other bridges, so the host is how it gets there.
+      HERMES_URL: ${HERMES_URL:-http://172.17.0.1:8642}
+      HERMES_API_KEY: ${HERMES_API_KEY:?set HERMES_API_KEY in .env}
+      # Empty = June's default model. A Hermes model_routes alias here picks a faster one.
+      HERMES_MODEL: ${HERMES_MODEL:-}
+      # Weather (Open-Meteo, no key). Lower East Side.
+      WEATHER_PLACE: ${WEATHER_PLACE:-NYC}
+      WEATHER_LAT: ${WEATHER_LAT:-40.715}
+      WEATHER_LON: ${WEATHER_LON:--73.986}
+      # The work calendar LightSync already writes for this phone, mounted read-only below.
+      CALENDAR_ICS: /calendar/work.ics
+      # Home Assistant: one entity for the Home tile. All three empty = tile stays quiet.
+      HA_URL: ${HA_URL:-}
+      HA_TOKEN: ${HA_TOKEN:-}
+      HA_ENTITY: ${HA_ENTITY:-}
+      HA_LABEL: ${HA_LABEL:-}
+      # Quick replies above the input, pipe-separated.
+      BRIGHTHERMES_CHIPS: ${BRIGHTHERMES_CHIPS:-summarize my day|lights off|snooze 10m}
+    volumes:
+      - ./data:/data
+      - /volume1/docker/lightsync/data/_calendar:/calendar:ro
+    networks:
+      - default
+      - tunnel
+
+networks:
+  tunnel:
+    name: cloudfare_v2_default
+    external: true
