@@ -1,21 +1,20 @@
 """
-Bots: anything with an OpenAI-compatible chat endpoint, sitting next to June.
+Bots: other Hermes agents, sitting next to June.
 
-June is a whole agent — tools, memory, cron — and gets `hermes.py`. A bot is smaller: a model
-behind `/v1/chat/completions`, with no memory of its own, so this module keeps the transcript
-for it (per phone, per bot, in the store) and replays the last few turns as context. That is
-enough for a fast local model to answer "lights off" in under a second, or for a second agent
-on another box to be one tap away, and it is the same shape LightChat's Agents use — a name,
-a base URL, a key, a model.
+A bot is a Hermes Agent with its API server on — another profile on June's own gateway
+(`/p/<profile>` once `gateway.multiplex_profiles` is on), or a Hermes running somewhere else
+entirely. Each one is a whole agent: its own sessions, memory, tools and cron, so the phone
+gets exactly what it gets from June — streamed text, tool markers, a transcript that lives on
+the server — and this module is nothing more than a roster of `hermes.Hermes` clients.
 
 Configured with `BOTS` as JSON:
 
-    BOTS='[{"id":"z13","name":"Qwen","base_url":"http://192.168.68.73:1234/v1",
-            "api_key":"","model":"qwen/qwen3.6-35b-a3b","system":"Answer in one line."}]'
+    BOTS='[{"id":"work","name":"Work","url":"http://172.17.0.1:8642/p/work","api_key":"…"},
+           {"id":"lab","name":"Lab","url":"http://192.168.68.73:8642","api_key":"…","model":""}]'
 
-The phone sees `{id, name}` for each and picks one per turn with `"bot": "<id>"` on the user
-frame. No `bot`, or `"june"`, is June. Events come out as the same `Event`s `hermes.py` yields,
-so `app.py` relays either without caring which it is.
+`api_key` may be left out for a profile on June's gateway; it then reuses June's. The phone sees
+`{id, name}` for each and picks one per turn with `"bot": "<id>"` on the user frame. No `bot`,
+or `"june"`, is June.
 """
 
 from __future__ import annotations
@@ -24,12 +23,9 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import AsyncIterator, Optional
+from typing import Optional
 
-import httpx
-
-from hermes import Event, parse_sse
-from store import Store
+from hermes import Hermes
 
 log = logging.getLogger("brighthermes.bots")
 
@@ -37,22 +33,18 @@ JUNE = "june"
 
 
 @dataclass(frozen=True)
-class Bot:
+class BotSpec:
     id: str
     name: str
-    base_url: str
+    url: str
     api_key: str = ""
     model: str = ""
-    system: str = ""
-    # How many past turns ride along as context. Small on purpose: these are the quick ones.
-    context_turns: int = 12
-    max_tokens: int = 400
 
     def public(self) -> dict:
         return {"id": self.id, "name": self.name}
 
     @staticmethod
-    def parse_all(raw: str) -> list["Bot"]:
+    def parse_all(raw: str) -> list["BotSpec"]:
         if not raw.strip():
             return []
         try:
@@ -60,91 +52,58 @@ class Bot:
         except json.JSONDecodeError as e:
             log.error("BOTS is not valid JSON: %s", e)
             return []
-        out: list[Bot] = []
+        out: list[BotSpec] = []
         for it in items if isinstance(items, list) else []:
             if not isinstance(it, dict):
                 continue
             bid = str(it.get("id", "")).strip()
-            url = str(it.get("base_url", "")).strip().rstrip("/")
+            url = str(it.get("url") or it.get("base_url") or "").strip().rstrip("/")
             if not bid or not url or bid == JUNE or not bid.isidentifier():
-                log.warning("skipping bot %r: needs an identifier id (not 'june') and a base_url", bid)
+                log.warning("skipping bot %r: needs an identifier id (not 'june') and a url", bid)
                 continue
             out.append(
-                Bot(
+                BotSpec(
                     id=bid,
                     name=str(it.get("name") or bid)[:24],
-                    base_url=url,
+                    url=url,
                     api_key=str(it.get("api_key", "")),
                     model=str(it.get("model", "")),
-                    system=str(it.get("system", "")),
-                    context_turns=int(it.get("context_turns", 12)),
-                    max_tokens=int(it.get("max_tokens", 400)),
                 )
             )
         return out
 
 
 class Bots:
-    def __init__(self, bots: list[Bot], store: Store, june_name: str = "June"):
-        self.by_id = {b.id: b for b in bots}
-        self.store = store
+    """June plus every configured Hermes, each behind the same client class."""
+
+    def __init__(self, specs: list[BotSpec], june: Hermes, june_name: str = "June"):
+        self.june = june
         self.june_name = june_name
-        self.http = httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=5.0))
+        self.specs = {s.id: s for s in specs}
+        self.clients: dict[str, Hermes] = {
+            s.id: Hermes(s.url, s.api_key or june.api_key, s.model) for s in specs
+        }
 
     async def aclose(self) -> None:
-        await self.http.aclose()
+        for c in self.clients.values():
+            await c.aclose()
 
     def roster(self) -> list[dict]:
         """June first, always; then the configured bots in order."""
-        return [{"id": JUNE, "name": self.june_name}] + [b.public() for b in self.by_id.values()]
+        return [{"id": JUNE, "name": self.june_name}] + [s.public() for s in self.specs.values()]
 
-    def get(self, bot_id: Optional[str]) -> Optional[Bot]:
-        return self.by_id.get(bot_id or "")
+    def client(self, bot_id: Optional[str]) -> Optional[Hermes]:
+        """The Hermes to talk to for `bot_id`; None means no such bot."""
+        if not bot_id or bot_id == JUNE:
+            return self.june
+        return self.clients.get(bot_id)
 
-    def transcript(self, device: str, bot_id: str, limit: int) -> list[dict]:
-        return self.store.bot_messages(device, bot_id, limit)
-
-    async def stream(self, bot: Bot, device: str, text: str) -> AsyncIterator[Event]:
-        history = self.store.bot_messages(device, bot.id, bot.context_turns * 2)
-        messages: list[dict] = []
-        if bot.system:
-            messages.append({"role": "system", "content": bot.system})
-        messages += [{"role": m["role"], "content": m["content"]} for m in history]
-        messages.append({"role": "user", "content": text})
-        self.store.append_bot_message(device, bot.id, "user", text)
-
-        body = {"messages": messages, "stream": True, "max_tokens": bot.max_tokens}
-        if bot.model:
-            body["model"] = bot.model
-        headers = {"Authorization": f"Bearer {bot.api_key}"} if bot.api_key else {}
-        full: list[str] = []
-        try:
-            async with self.http.stream("POST", f"{bot.base_url}/chat/completions", json=body, headers=headers) as r:
-                if r.status_code >= 400:
-                    await r.aread()
-                    yield Event("error", {"message": f"{bot.name} answered HTTP {r.status_code}"})
-                    return
-                async for ev in parse_sse(r.aiter_lines()):
-                    d = ev.data
-                    if "error" in d:
-                        err = d["error"]
-                        yield Event("error", {"message": str(err.get("message", err) if isinstance(err, dict) else err)})
-                        return
-                    for choice in d.get("choices", []):
-                        delta = (choice.get("delta") or {}).get("content")
-                        if delta:
-                            full.append(delta)
-                            yield Event("assistant.delta", {"delta": delta})
-        except httpx.HTTPError as e:
-            log.warning("bot %s: %s", bot.id, e)
-            yield Event("error", {"message": f"{bot.name} is not reachable"})
-            return
-        content = "".join(full)
-        if content.strip():
-            self.store.append_bot_message(device, bot.id, "assistant", content)
-        yield Event("assistant.completed", {"content": content})
-        yield Event("done", {})
+    def name(self, bot_id: Optional[str]) -> str:
+        if not bot_id or bot_id == JUNE:
+            return self.june_name
+        s = self.specs.get(bot_id)
+        return s.name if s else bot_id
 
 
-def bots_from_env() -> list[Bot]:
-    return Bot.parse_all(os.environ.get("BOTS", ""))
+def bots_from_env() -> list[BotSpec]:
+    return BotSpec.parse_all(os.environ.get("BOTS", ""))

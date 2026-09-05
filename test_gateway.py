@@ -173,6 +173,10 @@ def fake_june():
 
     j = FastAPI()
     j.state.sessions = set()
+    # Every route is also mounted under /p/work, the way a multiplexed Hermes profile is.
+    _get, _post = j.get, j.post
+    j.get = lambda path, **kw: (lambda f: (_get("/p/work" + path, **kw)(f), _get(path, **kw)(f))[1])
+    j.post = lambda path, **kw: (lambda f: (_post("/p/work" + path, **kw)(f), _post(path, **kw)(f))[1])
 
     @j.get("/health")
     def h():
@@ -203,19 +207,6 @@ def fake_june():
     @j.get("/api/sessions/{sid}/messages")
     def msgs(sid: str):
         return {"data": [{"role": "assistant", "content": "Hi.", "created_at": 2}, {"role": "user", "content": "hey", "created_at": 1}]}
-
-    @j.post("/bot/v1/chat/completions")
-    async def bot_completions(req: Request):
-        b = await req.json()
-        # Echo how much context arrived, so the test can see the transcript replayed.
-        n = len([m for m in b["messages"] if m["role"] != "system"])
-
-        async def gen():
-            yield f'data: {json.dumps({"choices": [{"delta": {"content": f"ctx{n} "}}]})}\n\n'
-            yield f'data: {json.dumps({"choices": [{"delta": {"content": "ok"}}]})}\n\n'
-            yield "data: [DONE]\n\n"
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
 
     @j.post("/api/sessions/{sid}/chat/stream")
     async def chat(sid: str, req: Request):
@@ -253,7 +244,7 @@ async def test_gateway_end_to_end(fake_june, monkeypatch):
     monkeypatch.setenv("WEATHER_LAT", "")  # no network fetchers in tests
     monkeypatch.setenv("WEATHER_LON", "")
     monkeypatch.setenv("BRIGHTHERMES_DIR", tempfile.mkdtemp())
-    monkeypatch.setenv("BOTS", json.dumps([{"id": "z13", "name": "Qwen", "base_url": fake_june + "/bot/v1", "model": "q", "system": "short"}]))
+    monkeypatch.setenv("BOTS", json.dumps([{"id": "work", "name": "Work", "url": fake_june + "/p/work"}]))
     import app as appmod
     appmod = importlib.reload(appmod)
     from fastapi.testclient import TestClient
@@ -308,24 +299,20 @@ async def test_gateway_end_to_end(fake_june, monkeypatch):
             ws.send_text('{"type":"ping"}')
             assert ws.receive_json() == {"type": "pong"}
 
-            # A plain bot: same frames, transcript kept by the gateway and replayed as context.
-            assert [b["id"] for b in ok["bots"]] == ["june", "z13"]
-            for i in range(2):
-                ws.send_text(json.dumps({"type": "user", "id": f"b{i}", "text": f"hey {i}", "bot": "z13"}))
-                got = []
-                while True:
-                    m = ws.receive_json()
-                    got.append(m)
-                    if m["type"] == "done":
-                        break
-                assert got[0]["bot"] == "z13"
-                # First turn sees 1 message of context (itself); second sees 3 (user, assistant, user).
-                assert got[-1]["text"] == ("ctx1 ok" if i == 0 else "ctx3 ok")
-            th = c.get("/thread?bot=z13", headers=H).json()
-            assert [m["role"] for m in th["messages"]] == ["user", "assistant", "user", "assistant"]
+            # Another Hermes agent: same frames, its own session, its own transcript.
+            assert [b["id"] for b in ok["bots"]] == ["june", "work"]
+            ws.send_text(json.dumps({"type": "user", "id": "b0", "text": "hello work", "bot": "work"}))
+            got = []
+            while True:
+                m = ws.receive_json()
+                got.append(m)
+                if m["type"] == "done":
+                    break
+            # (The fake shares one session set across prefixes, so this lands on the sessions path.)
+            assert got[0]["bot"] == "work" and got[-1]["text"].endswith("(hello work)")
+            assert [m["content"] for m in c.get("/thread?bot=work", headers=H).json()["messages"]] == ["hey", "Hi."]
             ws.send_text(json.dumps({"type": "user", "id": "b9", "text": "x", "bot": "nope"}))
             assert ws.receive_json()["type"] == "start"
             assert ws.receive_json()["type"] == "error"
-        assert c.get("/bots", headers=H).json()["bots"][1]["name"] == "Qwen"
-        assert c.delete("/thread?bot=z13", headers=H).json() == {"ok": True}
-        assert c.get("/thread?bot=z13", headers=H).json()["messages"] == []
+        assert c.get("/thread?bot=nope", headers=H).status_code == 404
+        assert c.get("/bots", headers=H).json()["bots"][1]["name"] == "Work"

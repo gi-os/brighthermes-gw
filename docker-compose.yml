@@ -31,7 +31,7 @@ services:
       HA_TOKEN: ${HA_TOKEN:-}
       HA_ENTITY: ${HA_ENTITY:-}
       HA_LABEL: ${HA_LABEL:-}
-      # Other bots beside June: a JSON list of OpenAI-compatible endpoints, see bots.py.
+      # Other Hermes agents beside June: a JSON list of {id, name, url, api_key}, see bots.py.
       BOTS: ${BOTS:-[]}
       # Quick replies above the input, pipe-separated.
       BRIGHTHERMES_CHIPS: ${BRIGHTHERMES_CHIPS:-summarize my day|lights off|snooze 10m}

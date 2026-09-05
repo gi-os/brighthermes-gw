@@ -11,8 +11,8 @@ have: a glanceable surface and a phone-shaped protocol for it.
     PUT  /deck/layout               the phone's arrangement (per device)
     GET  /tiles/{id}                one tile
     POST /tiles/{id}                push a tile payload — June's cron, HA, curl, anyone with the token
-    GET  /thread?limit=&bot=        transcript, oldest first — June's from Hermes, a bot's from here
-    GET  /bots                      the roster: June plus every OpenAI-compatible bot in BOTS
+    GET  /thread?limit=&bot=        transcript, oldest first, from that agent's own session store
+    GET  /bots                      the roster: June plus every other Hermes agent in BOTS
     POST /ingest                    batch of journal events from any Bright* app
     GET  /journal?limit=&app=       read the journal back (for June, or for you with curl)
     WS   /ws                        chat; protocol below
@@ -62,7 +62,7 @@ log = logging.getLogger("brighthermes")
 cfg = T.Config.from_env()
 store = Store(cfg.data_dir / "brighthermes.db")
 hermes = Hermes(cfg.hermes_url, cfg.hermes_key, cfg.hermes_model)
-bots = Bots(bots_from_env(), store)
+bots = Bots(bots_from_env(), june=hermes)
 refresher = T.Refresher(store, cfg)
 
 # Every open phone socket, so a tile change can be announced instead of polled for.
@@ -232,24 +232,14 @@ async def thread(
     bot: str = Query(default=JUNE),
     device: str = Depends(device_of),
 ):
-    if bot != JUNE:
-        if bots.get(bot) is None:
-            raise HTTPException(404, "no such bot")
-        return {"bot": bot, "messages": bots.transcript(device, bot, limit)}
+    agent = bots.client(bot)
+    if agent is None:
+        raise HTTPException(404, "no such bot")
     try:
-        return {"bot": JUNE, "messages": await hermes.messages(device, limit)}
+        return {"bot": bot, "messages": await agent.messages(device, limit)}
     except Exception as e:  # noqa: BLE001
-        log.warning("thread: %s", e)
-        raise HTTPException(502, "June did not answer")
-
-
-@app.delete("/thread", dependencies=[Depends(auth)])
-async def clear_thread(bot: str = Query(...), device: str = Depends(device_of)):
-    """Forget a bot's transcript on this phone. June's lives in Hermes and is not touched here."""
-    if bot == JUNE or bots.get(bot) is None:
-        raise HTTPException(400, "only a configured bot's transcript can be cleared here")
-    store.clear_bot(device, bot)
-    return {"ok": True}
+        log.warning("thread %s: %s", bot, e)
+        raise HTTPException(502, f"{bots.name(bot)} did not answer")
 
 
 @app.get("/bots", dependencies=[Depends(auth)])
@@ -328,14 +318,13 @@ async def ws(websocket: WebSocket, token: Optional[str] = Query(default=None)):
         reply_id = "r" + uuid.uuid4().hex[:8]
         await websocket.send_text(json.dumps({"type": "start", "id": user_id, "reply": reply_id, "bot": bot_id}))
         full: list[str] = []
-        bot = bots.get(bot_id)
-        if bot_id != JUNE and bot is None:
+        agent = bots.client(bot_id)
+        if agent is None:
             await websocket.send_text(json.dumps({"type": "error", "id": reply_id, "message": f"No bot called {bot_id}"}))
             turns.pop(user_id, None)
             return
-        source = hermes.stream(device, text) if bot is None else bots.stream(bot, device, text)
         try:
-            async for ev in source:
+            async for ev in agent.stream(device, text):
                 n, d = ev.name, ev.data
                 if n == "assistant.delta":
                     delta = d.get("delta", "")
@@ -356,13 +345,15 @@ async def ws(websocket: WebSocket, token: Optional[str] = Query(default=None)):
                         json.dumps({"type": "done", "id": reply_id, "text": content, "bot": bot_id}, ensure_ascii=False)
                     )
                 elif n == "error":
-                    await websocket.send_text(json.dumps({"type": "error", "id": reply_id, "message": d.get("message", "June hit an error")}))
+                    await websocket.send_text(
+                        json.dumps({"type": "error", "id": reply_id, "message": d.get("message", f"{bots.name(bot_id)} hit an error")})
+                    )
         except asyncio.CancelledError:
             await _send_quiet(websocket, json.dumps({"type": "done", "id": reply_id, "text": "".join(full), "stopped": True}))
             raise
         except Exception as e:  # noqa: BLE001
-            log.warning("turn %s: %s", user_id, e)
-            await _send_quiet(websocket, json.dumps({"type": "error", "id": reply_id, "message": "June is not reachable"}))
+            log.warning("turn %s (%s): %s", user_id, bot_id, e)
+            await _send_quiet(websocket, json.dumps({"type": "error", "id": reply_id, "message": f"{bots.name(bot_id)} is not reachable"}))
         finally:
             turns.pop(user_id, None)
 

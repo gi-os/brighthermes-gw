@@ -24,6 +24,13 @@ WS   /ws?token=              chat — protocol at the top of app.py
 Auth is `Authorization: Bearer $BRIGHTHERMES_TOKEN`. `X-Device` names the phone and scopes its
 June session (`brighthermes_<device>`) and its layout.
 
+## Bots
+
+`BOTS` lists other Hermes agents — a second profile on June's gateway (`/p/<profile>`) or a
+Hermes on another box — as `{id, name, url, api_key}`. Each is a whole agent behind the same
+client, so the phone gets sessions, tool markers and a server-kept transcript from every one of
+them. The roster rides on the socket's `ok` frame; a user frame picks one with `"bot"`.
+
 ## Tiles
 
 `weather` (Open-Meteo, no key), `next` (the `.ics` LightSync already writes for the phone,

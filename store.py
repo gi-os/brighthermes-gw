@@ -1,11 +1,10 @@
 """
-One SQLite file, four tables, no ORM.
+One SQLite file, three tables, no ORM.
 
 `tiles` is the latest payload per tile id — whoever last wrote it wins, whether that was the
 weather fetcher, a Hermes cron job curling `/tiles/digest`, or a Home Assistant automation.
 `layouts` is a phone's arrangement of the deck. `journal` is the ingest pipe: every event the
 Bright* apps report, appended and never rewritten, so June has something to read later.
-`bot_messages` is the transcript of each plain bot (see `bots.py`) — June keeps hers in Hermes.
 
 WAL mode because the WebSocket handler reads tiles while the refresher writes them, and the
 default rollback journal would make one of them wait.
@@ -42,15 +41,6 @@ CREATE TABLE IF NOT EXISTS journal (
     payload     TEXT NOT NULL           -- JSON, whatever the app sent, at most a few KB
 );
 CREATE INDEX IF NOT EXISTS journal_app_ts ON journal(app, ts);
-CREATE TABLE IF NOT EXISTS bot_messages (
-    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
-    device      TEXT NOT NULL,
-    bot         TEXT NOT NULL,
-    role        TEXT NOT NULL,          -- user | assistant
-    content     TEXT NOT NULL,
-    ts          REAL NOT NULL
-);
-CREATE INDEX IF NOT EXISTS bot_messages_key ON bot_messages(device, bot, seq);
 """
 
 
@@ -150,30 +140,6 @@ class Store:
             }
             for r in rows
         ]
-
-
-    # -- bots --------------------------------------------------------------------------------
-    #
-    # June keeps her own transcript inside Hermes; a plain bot has nowhere to, so it lives here.
-
-    def append_bot_message(self, device: str, bot: str, role: str, content: str) -> None:
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO bot_messages(device, bot, role, content, ts) VALUES(?,?,?,?,?)",
-                (device, bot, role, content[:16000], time.time()),
-            )
-
-    def bot_messages(self, device: str, bot: str, limit: int = 60) -> list[dict]:
-        """The last `limit` turns, oldest first, shaped like `hermes.transcript`."""
-        rows = self._conn.execute(
-            "SELECT role, content, ts FROM bot_messages WHERE device=? AND bot=? ORDER BY seq DESC LIMIT ?",
-            (device, bot, limit),
-        ).fetchall()
-        return [{"role": r["role"], "content": r["content"], "ts": r["ts"]} for r in reversed(rows)]
-
-    def clear_bot(self, device: str, bot: str) -> None:
-        with self._lock:
-            self._conn.execute("DELETE FROM bot_messages WHERE device=? AND bot=?", (device, bot))
 
 
 def _tile_row(r: sqlite3.Row) -> dict:
