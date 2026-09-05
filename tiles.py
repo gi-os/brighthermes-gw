@@ -53,6 +53,7 @@ class TileKind:
 CATALOG: list[TileKind] = [
     TileKind("clock", "Clock", local=True),
     TileKind("weather", "Weather", stale_after_s=45 * 60),
+    TileKind("air", "Air", stale_after_s=30 * 60),
     TileKind("next", "Next up", stale_after_s=30 * 60),
     TileKind("transit", "Transit", local=True),
     TileKind("home", "Home", stale_after_s=10 * 60),
@@ -125,6 +126,7 @@ class Refresher:
 
         if cfg.lat is not None and cfg.lon is not None:
             self.fetchers.append(Fetcher("weather", 10 * 60, self.weather))
+            self.fetchers.append(Fetcher("air", 30 * 60, self.air))
         if cfg.ics_path:
             self.fetchers.append(Fetcher("next", 5 * 60, self.calendar))
         if cfg.ha_url and cfg.ha_token and cfg.ha_entity:
@@ -186,6 +188,20 @@ class Refresher:
         r.raise_for_status()
         return weather_payload(r.json(), self.cfg.place, now=datetime.now(ZoneInfo(self.cfg.tz)))
 
+    # -- air: Open-Meteo air quality, no key, same coordinates ----------------------------------
+
+    async def air(self) -> Optional[dict]:
+        r = await self.http.get(
+            "https://air-quality-api.open-meteo.com/v1/air-quality",
+            params={
+                "latitude": self.cfg.lat,
+                "longitude": self.cfg.lon,
+                "current": "us_aqi,pm2_5",
+            },
+        )
+        r.raise_for_status()
+        return air_payload(r.json(), self.cfg.place)
+
     # -- calendar: the .ics LightSync already writes for this phone ----------------------------
 
     async def calendar(self) -> Optional[dict]:
@@ -242,6 +258,23 @@ def weather_payload(data: dict, place: str, now: datetime) -> dict:
         code = cur.get("weather_code")
         sub = "raining" if code in _WMO_RAIN else "snowing" if code in _WMO_SNOW else "clear"
     return {"label": place, "value": value, "sub": sub, "action": "brighthermes://tile/weather"}
+
+
+def air_payload(data: dict, place: str) -> dict:
+    """US AQI + pm2.5. Value is the number; the sub-line is what it means, which is the whole
+    point of a glance tile — nobody remembers the AQI bands, so the tile says them."""
+    cur = data.get("current", {})
+    aqi = cur.get("us_aqi")
+    if not isinstance(aqi, (int, float)):
+        return {"label": place, "value": "—", "sub": "", "action": "brighthermes://tile/air"}
+    bands = [
+        (50, "good"), (100, "moderate"), (150, "unhealthy-sens"),
+        (200, "unhealthy"), (300, "very unhealthy"), (float("inf"), "hazardous"),
+    ]
+    word = next(w for hi, w in bands if aqi <= hi)
+    pm = cur.get("pm2_5")
+    pm_s = f" · pm2.5 {round(pm)}" if isinstance(pm, (int, float)) else ""
+    return {"label": place, "value": str(round(aqi)), "sub": f"{word}{pm_s}", "action": "brighthermes://tile/air"}
 
 
 @dataclass(frozen=True)

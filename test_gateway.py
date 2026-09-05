@@ -48,6 +48,15 @@ def test_weather_dry_day_reads_current_sky():
     assert T.weather_payload(data, "NYC", now)["sub"] == "clear"
 
 
+def test_air_bands_and_pm():
+    base = {"current": {"pm2_5": 11.4}}
+    assert T.air_payload({**base, "current": {**base["current"], "us_aqi": 42}}, "NYC") == {
+        "label": "NYC", "value": "42", "sub": "good · pm2.5 11", "action": "brighthermes://tile/air"}
+    assert T.air_payload({**base, "current": {**base["current"], "us_aqi": 101}}, "NYC")["sub"].startswith("unhealthy-sens")
+    assert T.air_payload({**base, "current": {**base["current"], "us_aqi": 151}}, "NYC")["sub"].startswith("unhealthy ·")
+    assert T.air_payload({"current": {}}, "NYC")["value"] == "—"
+
+
 ICS = """BEGIN:VCALENDAR
 BEGIN:VEVENT
 DTSTART:20260904T233000Z
