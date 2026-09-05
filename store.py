@@ -80,9 +80,18 @@ class Store:
         rows = self._conn.execute("SELECT * FROM tiles").fetchall()
         return {r["id"]: _tile_row(r) for r in rows}
 
+    def devices(self) -> list[str]:
+        rows = self._conn.execute("SELECT DISTINCT device FROM layouts").fetchall()
+        return [r["device"] for r in rows]
+
     def tiles_updated_at(self) -> float:
-        row = self._conn.execute("SELECT MAX(updated_at) AS m FROM tiles").fetchone()
-        return float(row["m"] or 0.0)
+        # Layout edits must bump the deck's updated_at too, or the phone skips refetching
+        # after a rotation/arrange (it compares timestamps before refreshing).
+        row = self._conn.execute(
+            "SELECT MAX(m) AS m FROM (SELECT updated_at AS m FROM tiles "
+            "UNION ALL SELECT updated_at AS m FROM layouts)"
+        ).fetchone()
+        return row["m"] or 0.0
 
     # -- layouts -----------------------------------------------------------------------------
 

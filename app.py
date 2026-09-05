@@ -67,6 +67,7 @@ store = Store(cfg.data_dir / "brighthermes.db")
 hermes = Hermes(cfg.hermes_url, cfg.hermes_key, cfg.hermes_model)
 bots = Bots(bots_from_env(), june=hermes)
 refresher = T.Refresher(store, cfg)
+rotator = T.Rotator(store, cfg)
 
 # Every open phone socket, so a tile change can be announced instead of polled for.
 _sockets: set[WebSocket] = set()
@@ -86,6 +87,7 @@ async def _send_quiet(ws: WebSocket, text: str) -> None:
 
 
 refresher.on_change = _announce_deck
+rotator.on_change = _announce_deck
 
 
 @contextlib.asynccontextmanager
@@ -95,10 +97,12 @@ async def lifespan(_: FastAPI):
     if not cfg.hermes_key:
         log.warning("HERMES_API_KEY is empty; chat will fail with 401 from June")
     refresher.start()
+    rotator.start()
     try:
         yield
     finally:
         await refresher.stop()
+        await rotator.stop()
         await hermes.aclose()
         await bots.aclose()
         store.close()

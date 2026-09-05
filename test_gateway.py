@@ -340,3 +340,13 @@ async def test_gateway_end_to_end(fake_june, monkeypatch):
         assert c.post("/tiles/web1", headers=H, json={"value": "x"}).status_code == 400
         assert c.delete("/widgets/1", headers=H).json() == {"ok": True}
         assert c.get("/widgets/1", headers=H).text == ""
+
+
+def test_rotation_deterministic_anchored_full_catalog():
+    a = T.rotation_order(datetime(2026, 9, 4, 10, 30, tzinfo=NY))
+    b = T.rotation_order(datetime(2026, 9, 4, 10, 45, tzinfo=NY))
+    assert a == b  # same hour → same order
+    assert a[:2] == ["clock", "weather"]  # anchors never move
+    assert set(a) == {k.id for k in T.CATALOG}  # full catalog sweeps in
+    assert T.in_quiet_hours(datetime(2026, 9, 4, 3, 0, tzinfo=NY))
+    assert not T.in_quiet_hours(datetime(2026, 9, 4, 10, 0, tzinfo=NY))

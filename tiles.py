@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import re
 import time
 from dataclasses import dataclass, field
@@ -134,6 +135,67 @@ def validate_layout(layout) -> list[dict]:
         out.append({"id": tid, "span": span})
         seen.add(tid)
     return out
+
+
+# -- hourly rotation --------------------------------------------------------------------------
+
+ROTATE_ANCHORS = ["clock", "weather"]  # glance tiles that never move
+ROTATE_QUIET_HOURS = (1, 5)  # local time: no rotation 01:00–05:00
+
+
+def in_quiet_hours(now: datetime) -> bool:
+    return ROTATE_QUIET_HOURS[0] <= now.hour < ROTATE_QUIET_HOURS[1]
+
+
+def rotation_order(now: datetime) -> list[str]:
+    """Anchors first; the rest of the catalog rotated deterministically by the hour — stable
+    all hour, new on the hour. New catalog tiles sweep in automatically."""
+    rng = random.Random(now.replace(minute=0, second=0, microsecond=0).isoformat())
+    pool = [k.id for k in CATALOG if k.id not in ROTATE_ANCHORS]
+    rng.shuffle(pool)
+    return ROTATE_ANCHORS + pool
+
+
+class Rotator:
+    """Hourly deck rotation: reorders every phone's layout and announces the change. Spans are
+    preserved from the current layout; tiles new to the device default to span 1."""
+
+    def __init__(self, store: Store, cfg: "Config"):
+        self.store = store
+        self.cfg = cfg
+        self._task: Optional[asyncio.Task] = None
+        self.on_change: Optional[Callable[[str], None]] = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._loop(), name="deck-rotator")
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    async def _loop(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            self.tick()
+
+    def tick(self) -> None:
+        now = datetime.now(ZoneInfo(self.cfg.tz))
+        if in_quiet_hours(now):
+            return
+        order = rotation_order(now)
+        for device in self.store.devices():
+            cur = self.store.get_layout(device) or DEFAULT_LAYOUT
+            span = {t["id"]: t.get("span", 1) for t in cur}
+            layout = [{"id": tid, "span": span.get(tid, 1)} for tid in order]
+            if layout != cur:
+                self.store.put_layout(device, layout)
+                if self.on_change:
+                    self.on_change("clock")  # any id; the frame carries the bumped updated_at
 
 
 # -- fetchers --------------------------------------------------------------------------------
