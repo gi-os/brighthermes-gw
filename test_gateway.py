@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -341,6 +342,15 @@ async def test_gateway_end_to_end(fake_june, monkeypatch):
         assert c.delete("/widgets/1", headers=H).json() == {"ok": True}
         assert c.get("/widgets/1", headers=H).text == ""
 
+        # The lock face: one card, with a clock on it, never in the deck's tiles.
+        assert c.get("/lock", headers=H).json() == {}
+        r = c.post("/lock", headers=H, json={"title": "Garage open", "text": "since 6:40 — nobody home", "ttl_s": 60})
+        assert r.status_code == 200 and r.json()["title"] == "Garage open" and r.json()["expires_at"] > time.time() + 50
+        assert c.get("/lock", headers=H).json()["text"] == "since 6:40 — nobody home"
+        assert "lock" not in c.get("/deck", headers=H).json()["tiles"]
+        assert c.post("/lock", headers=H, json={}).status_code == 400
+        assert c.delete("/lock", headers=H).json() == {"ok": True}
+        assert c.get("/lock", headers=H).json() == {}
 
 def test_rotation_deterministic_anchored_full_catalog():
     a = T.rotation_order(datetime(2026, 9, 4, 10, 30, tzinfo=NY))

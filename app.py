@@ -14,6 +14,9 @@ have: a glanceable surface and a phone-shaped protocol for it.
     GET  /widgets/{n}               the HTML of widget n (1–3), as text/html
     POST /widgets/{n}               set it: JSON {"html": …, "height": grid units, "label": …} or a raw text/html body
     DELETE /widgets/{n}             blank it; the phone stops drawing it
+    GET  /lock                      what June has put on the lock face, or {} when nothing
+    POST /lock                      take the lock face over: {"title", "text", "ttl_s"?, "action"?}
+    DELETE /lock                    give it back
     GET  /thread?limit=&bot=        transcript, oldest first, from that agent's own session store
     GET  /bots                      the roster: June plus every other Hermes agent in BOTS
     POST /ingest                    batch of journal events from any Bright* app
@@ -158,7 +161,7 @@ def _deck_for(device: str) -> dict:
     return {
         "v": 1,
         "layout": layout,
-        "tiles": store.all_tiles(),
+        "tiles": {k: v for k, v in store.all_tiles().items() if k != LOCK_ID},
         "catalog": [{"id": k.id, "name": k.name, "local": k.local, "html": k.html} for k in T.CATALOG],
         "chips": cfg.chips,
         "updated_at": store.tiles_updated_at(),
@@ -281,6 +284,68 @@ async def clear_widget(n: int):
     kind = _widget_kind(n)
     store.put_tile(kind.id, {"label": kind.name, "value": "", "sub": "", "html": "", "height": T.WIDGET_DEFAULT_HEIGHT})
     _announce_deck(kind.id)
+    return {"ok": True}
+
+
+# -- the lock face -------------------------------------------------------------------------------
+#
+# One card, for the very important thing. BrightControl's lock face reads it off the phone's
+# provider and draws it where the music player goes, in place of the player, until it is cleared
+# or its time runs out. This is deliberately a single slot and not a queue: a lock screen that
+# can hold one urgent thing is a lock screen; one that holds five is a notification shade.
+
+LOCK_ID = "lock"
+LOCK_DEFAULT_TTL_S = 30 * 60
+LOCK_MAX_TTL_S = 24 * 3600
+
+
+def _lock_now() -> Optional[dict]:
+    t = store.get_tile(LOCK_ID)
+    if not t or not t.get("title") and not t.get("value"):
+        return None
+    exp = t.get("expires_at")
+    if isinstance(exp, (int, float)) and time.time() > exp:
+        return None
+    return t
+
+
+@app.get("/lock", dependencies=[Depends(auth)])
+async def get_lock():
+    return _lock_now() or {}
+
+
+@app.post("/lock", dependencies=[Depends(auth)])
+async def set_lock(request: Request):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "payload must be an object")
+    title = str(body.get("title", "")).strip()[:40]
+    text = str(body.get("text", "")).strip()[:200]
+    if not title and not text:
+        raise HTTPException(400, "title or text is required")
+    try:
+        ttl = float(body.get("ttl_s", LOCK_DEFAULT_TTL_S))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "ttl_s must be a number of seconds")
+    ttl = max(30.0, min(LOCK_MAX_TTL_S, ttl))
+    payload = {
+        "label": "June",
+        "title": title,
+        "value": title,   # so a generic tile reader still sees the headline
+        "sub": text,
+        "text": text,
+        "expires_at": time.time() + ttl,
+        "action": str(body.get("action") or "brighthermes://chat")[:256],
+    }
+    store.put_tile(LOCK_ID, payload)
+    _announce_deck(LOCK_ID)
+    return store.get_tile(LOCK_ID)
+
+
+@app.delete("/lock", dependencies=[Depends(auth)])
+async def clear_lock():
+    store.put_tile(LOCK_ID, {"label": "June", "title": "", "value": "", "sub": "", "text": "", "expires_at": 0})
+    _announce_deck(LOCK_ID)
     return {"ok": True}
 
 

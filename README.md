@@ -49,6 +49,13 @@ not drawn. The phone renders it in a WebView with JavaScript on and hands the pa
 auth headers filled in, so a widget can call this gateway back. HTML is capped at 64KB each
 because all three ride in every `/deck`.
 
+## The lock face
+
+`POST /lock {"title", "text", "ttl_s" (default 30 min, max 24 h), "action"?}` puts one card on
+the phone's lock screen — BrightControl draws it where the music player goes, in place of the
+player, until `DELETE /lock` or the time runs out. `GET /lock` reads it; `{}` when nothing. One
+slot on purpose: this is for the very important thing, not a shade.
+
 ## Running
 
 ```sh
