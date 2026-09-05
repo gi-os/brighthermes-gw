@@ -39,6 +39,16 @@ their own. `digest` and anything else are **pushed** — that is how June's cron
 number on the deck. Local tiles (`clock`, `transit`, `music`, `pods`) are the phone's; the
 gateway only lists them for the edit palette.
 
+## Widgets
+
+`web1`–`web3` are surfaces June draws herself. `POST /widgets/{n}` with JSON
+`{"html": …, "height": <grid units, default 8>, "label": …}` or a raw `text/html` body
+(`?height=&label=` on the query); `GET` reads it back; `DELETE` blanks it, and a blank widget is
+not drawn. The phone renders it in a WebView with JavaScript on and hands the page
+`window.brighthermes = {server, token, device}` plus `brighthermes.fetch(path, opts)` with the
+auth headers filled in, so a widget can call this gateway back. HTML is capped at 64KB each
+because all three ride in every `/deck`.
+
 ## Running
 
 ```sh

@@ -11,6 +11,9 @@ have: a glanceable surface and a phone-shaped protocol for it.
     PUT  /deck/layout               the phone's arrangement (per device)
     GET  /tiles/{id}                one tile
     POST /tiles/{id}                push a tile payload — June's cron, HA, curl, anyone with the token
+    GET  /widgets/{n}               the HTML of widget n (1–3), as text/html
+    POST /widgets/{n}               set it: JSON {"html": …, "height": grid units, "label": …} or a raw text/html body
+    DELETE /widgets/{n}             blank it; the phone stops drawing it
     GET  /thread?limit=&bot=        transcript, oldest first, from that agent's own session store
     GET  /bots                      the roster: June plus every other Hermes agent in BOTS
     POST /ingest                    batch of journal events from any Bright* app
@@ -152,7 +155,7 @@ def _deck_for(device: str) -> dict:
         "v": 1,
         "layout": layout,
         "tiles": store.all_tiles(),
-        "catalog": [{"id": k.id, "name": k.name, "local": k.local} for k in T.CATALOG],
+        "catalog": [{"id": k.id, "name": k.name, "local": k.local, "html": k.html} for k in T.CATALOG],
         "chips": cfg.chips,
         "updated_at": store.tiles_updated_at(),
     }
@@ -199,6 +202,8 @@ async def post_tile(tile_id: str, request: Request):
     kind = T.KINDS.get(tile_id)
     if kind and kind.local:
         raise HTTPException(400, f"{tile_id} is filled on the phone, not here")
+    if kind and kind.html:
+        raise HTTPException(400, f"{tile_id} is a widget: POST /widgets/{tile_id[-1]} with html")
     if not (tile_id.isidentifier() and len(tile_id) <= 32):
         raise HTTPException(400, "tile id: letters, digits, underscore, ≤32")
     body = await request.json()
@@ -215,6 +220,64 @@ async def post_tile(tile_id: str, request: Request):
     store.put_tile(tile_id, payload, float(stale) if isinstance(stale, (int, float)) else (kind.stale_after_s if kind else None))
     _announce_deck(tile_id)
     return store.get_tile(tile_id)
+
+
+# -- widgets ---------------------------------------------------------------------------------------
+#
+# Three rectangles on the deck that June draws herself. Whatever HTML lands here is what the
+# phone shows, in a WebView with JavaScript on, sized `height` grid units tall and the full
+# width of the deck. The page gets `window.brighthermes = {server, token, device}` injected
+# before it runs, so a widget can call this gateway back — poll a tile, post to the journal,
+# send a message — and be a live little app rather than a picture.
+
+
+def _widget_kind(n: int) -> T.TileKind:
+    kind = T.KINDS.get(f"web{n}")
+    if kind is None or not kind.html:
+        raise HTTPException(404, "widgets are 1, 2 and 3")
+    return kind
+
+
+@app.get("/widgets/{n}", dependencies=[Depends(auth)])
+async def get_widget(n: int):
+    kind = _widget_kind(n)
+    t = store.get_tile(kind.id)
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse((t or {}).get("html", ""))
+
+
+@app.post("/widgets/{n}", dependencies=[Depends(auth)])
+async def set_widget(n: int, request: Request):
+    kind = _widget_kind(n)
+    ctype = request.headers.get("content-type", "")
+    if ctype.startswith("application/json"):
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "payload must be an object")
+    else:
+        # Raw HTML straight from a heredoc or a Hermes tool call, no JSON quoting to get wrong.
+        body = {"html": (await request.body()).decode("utf-8", "replace")}
+        for k in ("height", "label", "sub"):
+            v = request.query_params.get(k)
+            if v is not None:
+                body[k] = v
+    try:
+        payload = T.widget_payload(body, kind)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.put_tile(kind.id, payload)
+    _announce_deck(kind.id)
+    t = dict(store.get_tile(kind.id) or {})
+    t["html"] = f"<{len(payload['html'])} bytes>"
+    return t
+
+
+@app.delete("/widgets/{n}", dependencies=[Depends(auth)])
+async def clear_widget(n: int):
+    kind = _widget_kind(n)
+    store.put_tile(kind.id, {"label": kind.name, "value": "", "sub": "", "html": "", "height": T.WIDGET_DEFAULT_HEIGHT})
+    _announce_deck(kind.id)
+    return {"ok": True}
 
 
 @app.post("/deck/refresh", dependencies=[Depends(auth)])

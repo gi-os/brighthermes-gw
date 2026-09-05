@@ -48,6 +48,9 @@ class TileKind:
     # How long a payload is trusted before the phone should dim it. None: never dims (pushed
     # tiles have no schedule of their own).
     stale_after_s: Optional[float] = None
+    # A widget: the payload carries `html` and the phone renders it in a WebView instead of the
+    # label/value/sub shape. June writes these wholesale — see `POST /widgets/{n}` in app.py.
+    html: bool = False
 
 
 CATALOG: list[TileKind] = [
@@ -60,11 +63,17 @@ CATALOG: list[TileKind] = [
     TileKind("digest", "June"),
     TileKind("music", "Now playing", local=True),
     TileKind("pods", "LightPods", local=True),
+    # Three surfaces June owns outright. Anything HTML, any height, live JS, swapped whole.
+    TileKind("web1", "Widget 1", html=True),
+    TileKind("web2", "Widget 2", html=True),
+    TileKind("web3", "Widget 3", html=True),
 ]
 KINDS = {k.id: k for k in CATALOG}
 
 # What a phone gets before it has arranged anything. The digest is the full-width row: it is the
 # one tile no other app can draw, so it gets the most room. Order is reading order.
+# The widgets sit at the end, full width; the phone draws one only once it has HTML in it, so an
+# empty widget costs no space. June filling one is what makes it appear.
 DEFAULT_LAYOUT: list[dict] = [
     {"id": "clock", "span": 1},
     {"id": "weather", "span": 1},
@@ -72,7 +81,38 @@ DEFAULT_LAYOUT: list[dict] = [
     {"id": "transit", "span": 1},
     {"id": "home", "span": 1},
     {"id": "digest", "span": 2},
+    {"id": "web1", "span": 2},
+    {"id": "web2", "span": 2},
+    {"id": "web3", "span": 2},
 ]
+
+# Widget HTML is capped: the deck is fetched on every screen-on, and three of these ride in it.
+WIDGET_MAX_HTML = 64 * 1024
+WIDGET_DEFAULT_HEIGHT = 8   # LightGrid units of 15dp → 120dp
+WIDGET_MAX_HEIGHT = 24
+
+
+def widget_payload(body: dict, kind: TileKind) -> dict:
+    """Validate what June sent for a widget. `html` may be a fragment or a whole document."""
+    html = body.get("html", "")
+    if not isinstance(html, str):
+        raise ValueError("html must be a string")
+    if len(html) > WIDGET_MAX_HTML:
+        raise ValueError(f"html is over {WIDGET_MAX_HTML} bytes")
+    height = body.get("height", WIDGET_DEFAULT_HEIGHT)
+    try:
+        height = int(height)
+    except (TypeError, ValueError):
+        raise ValueError("height must be an integer number of grid units")
+    height = max(2, min(WIDGET_MAX_HEIGHT, height))
+    return {
+        "label": str(body.get("label") or kind.name)[:24],
+        "value": "",
+        "sub": str(body.get("sub", ""))[:64],
+        "html": html,
+        "height": height,
+        **({"action": str(body["action"])[:256]} if body.get("action") else {}),
+    }
 
 # What the digest says until June has said anything. Deliberately not "0 done": a number that
 # is always zero is a number nobody reads, and this tile has to earn its glance.

@@ -325,3 +325,18 @@ async def test_gateway_end_to_end(fake_june, monkeypatch):
             assert ws.receive_json()["type"] == "error"
         assert c.get("/thread?bot=nope", headers=H).status_code == 404
         assert c.get("/bots", headers=H).json()["bots"][1]["name"] == "Work"
+
+        # Widgets: HTML in, HTML out, sized in grid units, capped, and refused on the tiles path.
+        r = c.post("/widgets/1", headers=H, json={"html": "<b>hi</b>", "height": 99, "label": "Garage"})
+        assert r.status_code == 200 and r.json()["height"] == T.WIDGET_MAX_HEIGHT and r.json()["label"] == "Garage"
+        r = c.post("/widgets/2", headers={**H, "Content-Type": "text/html"}, params={"height": "4"}, content="<i>raw</i>")
+        assert r.status_code == 200 and r.json()["height"] == 4
+        assert c.get("/widgets/2", headers=H).text == "<i>raw</i>"
+        d = c.get("/deck", headers=H).json()
+        assert d["tiles"]["web1"]["html"] == "<b>hi</b>" and d["tiles"]["web2"]["height"] == 4
+        assert any(k["id"] == "web1" and k["html"] for k in d["catalog"])
+        assert c.post("/widgets/4", headers=H, json={"html": ""}).status_code == 404
+        assert c.post("/widgets/1", headers=H, json={"html": "x" * (T.WIDGET_MAX_HTML + 1)}).status_code == 400
+        assert c.post("/tiles/web1", headers=H, json={"value": "x"}).status_code == 400
+        assert c.delete("/widgets/1", headers=H).json() == {"ok": True}
+        assert c.get("/widgets/1", headers=H).text == ""
