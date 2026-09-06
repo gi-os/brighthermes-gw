@@ -20,6 +20,10 @@ services:
       HERMES_API_KEY: ${HERMES_API_KEY:?set HERMES_API_KEY in .env}
       # Empty = June's default model. A Hermes model_routes alias here picks a faster one.
       HERMES_MODEL: ${HERMES_MODEL:-}
+      # Reasoning effort per turn: none / low / medium / high. June's own default is medium; the
+      # phone asks for low, which is most of the difference between "lights off" taking two
+      # seconds and taking five. `none` is faster still and fine for commands, worse for questions.
+      HERMES_REASONING: ${HERMES_REASONING:-low}
       # Weather (Open-Meteo, no key). Lower East Side.
       WEATHER_PLACE: ${WEATHER_PLACE:-NYC}
       WEATHER_LAT: ${WEATHER_LAT:-40.715}

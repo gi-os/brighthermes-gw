@@ -35,12 +35,16 @@ class Event:
 
 
 class Hermes:
-    def __init__(self, base_url: str, api_key: str, model: str = "", timeout_s: float = 600.0):
+    def __init__(self, base_url: str, api_key: str, model: str = "", timeout_s: float = 600.0, reasoning: str = ""):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         # Empty means "whatever the gateway's default is". A model alias here (Hermes
         # `model_routes`) is how a fast local model gets picked for voice commands later.
         self.model = model
+        # Per-turn reasoning effort — none / low / medium / high — sent as `model_options`.
+        # This is the single biggest lever on time-to-first-word for a phone that asks for the
+        # lights to go off: June's default is `medium`, and a glance surface wants `low`.
+        self.reasoning = reasoning.strip().lower()
         self.timeout_s = timeout_s
         # Session ids known to exist with a real model — see [ensure_session].
         self._known: set[str] = set()
@@ -135,6 +139,8 @@ class Hermes:
             body["system_message"] = system
         if self.model:
             body["model"] = self.model
+        if self.reasoning:
+            body["model_options"] = {"reasoning_effort": self.reasoning}
         async with self._client.stream("POST", f"/api/sessions/{sid}/chat/stream", json=body) as r:
             if r.status_code == 404:
                 # Session vanished under us (Hermes DB reset). Bootstrap again.
@@ -154,6 +160,8 @@ class Hermes:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": text})
         body = {"model": self.model or "hermes-agent", "messages": messages, "stream": True}
+        if self.reasoning:
+            body["model_options"] = {"reasoning_effort": self.reasoning}
         headers = {"X-Hermes-Session-Id": sid}
         full: list[str] = []
         async with self._client.stream("POST", "/v1/chat/completions", json=body, headers=headers) as r:

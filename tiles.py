@@ -505,6 +505,7 @@ class Config:
     hermes_url: str
     hermes_key: str
     hermes_model: str
+    hermes_reasoning: str
     data_dir: Path
     tz: str
     place: str
@@ -532,6 +533,7 @@ class Config:
             hermes_url=os.environ.get("HERMES_URL", "http://172.17.0.1:8642"),
             hermes_key=os.environ.get("HERMES_API_KEY", ""),
             hermes_model=os.environ.get("HERMES_MODEL", ""),
+            hermes_reasoning=os.environ.get("HERMES_REASONING", "low"),
             data_dir=Path(os.environ.get("BRIGHTHERMES_DIR", "/data")),
             tz=os.environ.get("TZ", "America/New_York"),
             place=os.environ.get("WEATHER_PLACE", "NYC"),

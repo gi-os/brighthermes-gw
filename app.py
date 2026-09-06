@@ -67,7 +67,7 @@ log = logging.getLogger("brighthermes")
 
 cfg = T.Config.from_env()
 store = Store(cfg.data_dir / "brighthermes.db")
-hermes = Hermes(cfg.hermes_url, cfg.hermes_key, cfg.hermes_model)
+hermes = Hermes(cfg.hermes_url, cfg.hermes_key, cfg.hermes_model, reasoning=cfg.hermes_reasoning)
 bots = Bots(bots_from_env(), june=hermes)
 refresher = T.Refresher(store, cfg)
 rotator = T.Rotator(store, cfg)
@@ -455,12 +455,16 @@ async def ws(websocket: WebSocket, token: Optional[str] = Query(default=None)):
             await websocket.send_text(json.dumps({"type": "error", "id": reply_id, "message": f"No bot called {bot_id}"}))
             turns.pop(user_id, None)
             return
+        t0 = time.monotonic()
+        first: Optional[float] = None
         try:
             async for ev in agent.stream(device, text):
                 n, d = ev.name, ev.data
                 if n == "assistant.delta":
                     delta = d.get("delta", "")
                     if delta:
+                        if first is None:
+                            first = time.monotonic() - t0
                         full.append(delta)
                         await websocket.send_text(json.dumps({"type": "delta", "id": reply_id, "text": delta}, ensure_ascii=False))
                 elif n == "tool.progress":
@@ -473,6 +477,9 @@ async def ws(websocket: WebSocket, token: Optional[str] = Query(default=None)):
                     )
                 elif n == "assistant.completed":
                     content = d.get("content") or "".join(full)
+                    # The two numbers that answer "why is she slow": time to the first word, and
+                    # the whole turn. Read them with `docker logs brighthermes | grep turn`.
+                    log.info("turn %s (%s): first word %.1fs, done %.1fs, %d chars", user_id, bot_id, first or -1.0, time.monotonic() - t0, len(content))
                     await websocket.send_text(
                         json.dumps({"type": "done", "id": reply_id, "text": content, "bot": bot_id}, ensure_ascii=False)
                     )
