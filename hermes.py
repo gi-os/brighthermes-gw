@@ -211,6 +211,33 @@ async def parse_sse(lines) -> AsyncIterator[Event]:
             pass
 
 
+# What Hermes writes as the assistant's turn when the model call itself failed — after its own
+# retries and fallbacks — is the error text. On a phone that reads as June saying "HTTP 429:
+# rate limited", which is not something she said. These are recognised and turned back into
+# errors on the wire, and left out of the transcript.
+_ERROR_SHAPES = (
+    "HTTP 429", "HTTP 5", "rate limited", "Rate limited", "API call failed", "API failed after",
+    "Error 524", "(No response generated)", "RateLimitError", "InternalServerError",
+)
+
+
+def looks_like_error(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    head = t[:200]
+    return any(shape in head for shape in _ERROR_SHAPES)
+
+
+def friendly_error(text: str) -> str:
+    t = text or ""
+    if "429" in t or "ate limit" in t:
+        return "June's model is rate-limited right now. Try again in a moment."
+    if "524" in t or "timeout" in t.lower() or "timed out" in t.lower():
+        return "June's model timed out. Try again."
+    return "June's model failed to answer. Try again."
+
+
 def transcript(rows: list[dict]) -> list[dict]:
     """
     Hermes message rows → what the phone draws: user and assistant text only, oldest first.
@@ -225,6 +252,8 @@ def transcript(rows: list[dict]) -> list[dict]:
             continue
         content = plain(m.get("content"))
         if not content.strip():
+            continue
+        if role == "assistant" and looks_like_error(content):
             continue
         out.append({"role": role, "content": content, "ts": m.get("created_at") or m.get("timestamp")})
     if len(out) >= 2 and _newest_first(out):

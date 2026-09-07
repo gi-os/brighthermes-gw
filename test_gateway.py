@@ -160,6 +160,20 @@ async def test_sse_parser_handles_names_keepalives_and_multiline():
     assert got[1] == Event("done", {})
 
 
+def test_model_errors_are_recognised_and_kept_out_of_the_transcript():
+    from hermes import looks_like_error, friendly_error
+    assert looks_like_error("HTTP 429: rate limited")
+    assert looks_like_error("API call failed after 3 retries. HTTP 524: ...")
+    assert not looks_like_error("The garage has been open since 6:40.")
+    assert "rate-limited" in friendly_error("HTTP 429: rate limited")
+    rows = [
+        {"role": "user", "content": "hi", "created_at": 1},
+        {"role": "assistant", "content": "❌ Rate limited after 3 retries — HTTP 429: rate limited", "created_at": 2},
+        {"role": "assistant", "content": "Hi.", "created_at": 3},
+    ]
+    assert [m["content"] for m in transcript(rows)] == ["hi", "Hi."]
+
+
 def test_transcript_keeps_text_turns_oldest_first():
     rows = [
         {"role": "assistant", "content": [{"type": "text", "text": "Done."}], "created_at": 30},

@@ -59,7 +59,7 @@ from fastapi.responses import JSONResponse
 
 import tiles as T
 from bots import JUNE, Bots, bots_from_env
-from hermes import Hermes
+from hermes import Hermes, friendly_error, looks_like_error
 from store import Store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -477,6 +477,12 @@ async def ws(websocket: WebSocket, token: Optional[str] = Query(default=None)):
                     )
                 elif n == "assistant.completed":
                     content = d.get("content") or "".join(full)
+                    if looks_like_error(content) and len(content) < 2000:
+                        # The model call failed inside Hermes and came back as words. Say so as
+                        # an error, not as a reply; the phone raises its chip and a notice.
+                        log.warning("turn %s (%s): model error surfaced as reply: %s", user_id, bot_id, content[:160])
+                        await websocket.send_text(json.dumps({"type": "error", "id": reply_id, "message": friendly_error(content)}))
+                        continue
                     # The two numbers that answer "why is she slow": time to the first word, and
                     # the whole turn. Read them with `docker logs brighthermes | grep turn`.
                     log.info("turn %s (%s): first word %.1fs, done %.1fs, %d chars", user_id, bot_id, first or -1.0, time.monotonic() - t0, len(content))
